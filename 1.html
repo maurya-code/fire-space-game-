@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ULTRA-STABLE AR SHOOTER</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
+        #loading { position: fixed; inset: 0; background: #000; color: #0f0; display: flex; justify-content: center; align-items: center; z-index: 1000; flex-direction: column; }
+        #ui { position: absolute; top: 10px; width: 100%; text-align: center; color: white; font-size: 24px; z-index: 10; pointer-events: none; }
+        #debug-container { position: absolute; bottom: 10px; right: 10px; width: 200px; height: 150px; border: 2px solid #0f0; background: #222; overflow: hidden; }
+        #hand-video { width: 100%; height: 100%; transform: scaleX(-1); }
+        #hand-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
+    </style>
+</head>
+<body>
+
+<div id="loading">
+    <h2>INITIALIZING NEURAL LINK...</h2>
+    <p id="status">Waiting for Camera...</p>
+</div>
+
+<div id="ui">BLASTS: <span id="score">0</span></div>
+
+<div id="debug-container">
+    <video id="hand-video" playsinline></video>
+    <canvas id="hand-canvas"></canvas>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+/**
+ * 1. SCENE SETUP
+ */
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Lighting
+const light = new THREE.PointLight(0x00ffff, 2, 50);
+scene.add(light, new THREE.AmbientLight(0x404040));
+
+// Reticle (Your Aim)
+const reticle = new THREE.Mesh(
+    new THREE.RingGeometry(0.3, 0.4, 32),
+    new THREE.MeshBasicMaterial({ color: 0x00f2ff, side: THREE.DoubleSide })
+);
+reticle.position.z = -10;
+scene.add(reticle);
+
+const targets = [];
+const particles = [];
+let score = 0;
+
+/**
+ * 2. OBJECT CREATION
+ */
+function createTarget() {
+    const geo = new THREE.TorusGeometry(0.7, 0.15, 12, 48);
+    const mat = new THREE.MeshPhongMaterial({ color: 0x111111, emissive: 0xff0055, emissiveIntensity: 2 });
+    const obj = new THREE.Mesh(geo, mat);
+    
+    obj.position.set((Math.random()-0.5)*15, (Math.random()-0.5)*10, -30);
+    obj.userData.speed = 0.1 + Math.random() * 0.1;
+    scene.add(obj);
+    targets.push(obj);
+}
+
+function explode(pos) {
+    for(let i=0; i<15; i++) {
+        const p = new THREE.Mesh(new THREE.SphereGeometry(0.1), new THREE.MeshBasicMaterial({color: 0xff0055}));
+        p.position.copy(pos);
+        p.userData.v = new THREE.Vector3((Math.random()-0.5)*0.4, (Math.random()-0.5)*0.4, (Math.random()-0.5)*0.4);
+        p.userData.life = 1.0;
+        scene.add(p);
+        particles.push(p);
+    }
+}
+
+/**
+ * 3. AI & CAMERA
+ */
+const video = document.getElementById('hand-video');
+const canvasElement = document.getElementById('hand-canvas');
+const canvasCtx = canvasElement.getContext('2d');
+
+const hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
+});
+
+hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+
+hands.onResults((results) => {
+    // Debug Drawing
+    canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+    if (results.multiHandLandmarks && results.multiHandLandmarks[0]) {
+        const landmarks = results.multiHandLandmarks[0];
+        const indexTip = landmarks[8];
+
+        // Draw debug dot on finger
+        canvasCtx.fillStyle = "#f00";
+        canvasCtx.beginPath();
+        canvasCtx.arc(indexTip.x * canvasElement.width, indexTip.y * canvasElement.height, 5, 0, 2*Math.PI);
+        canvasCtx.fill();
+
+        // Map Hand to 3D Space
+        const targetX = (indexTip.x - 0.5) * -25;
+        const targetY = (indexTip.y - 0.5) * -15;
+        reticle.position.lerp(new THREE.Vector3(targetX, targetY, -10), 0.2);
+
+        // AUTO-FIRE CHECK
+        targets.forEach((t, i) => {
+            const dist = reticle.position.distanceTo(new THREE.Vector3(t.position.x, t.position.y, -10));
+            if (dist < 1.5) {
+                score++;
+                document.getElementById('score').innerText = score;
+                explode(t.position);
+                scene.remove(t);
+                targets.splice(i, 1);
+                createTarget();
+            }
+        });
+    }
+});
+
+/**
+ * 4. ENGINE START
+ */
+const cameraHelper = new Camera(video, {
+    onFrame: async () => { await hands.send({image: video}); },
+    width: 640, height: 480
+});
+
+cameraHelper.start().then(() => {
+    document.getElementById('loading').style.display = 'none';
+    for(let i=0; i<4; i++) createTarget();
+    animate();
+}).catch(e => {
+    document.getElementById('status').innerText = "CAMERA BLOCKED! Enable permissions.";
+});
+
+function animate() {
+    requestAnimationFrame(animate);
+    
+    targets.forEach(t => {
+        t.position.z += t.userData.speed;
+        t.rotation.y += 0.05;
+        if(t.position.z > 5) t.position.z = -30; // Reset
+    });
+
+    particles.forEach((p, i) => {
+        p.position.add(p.userData.v);
+        p.userData.life -= 0.02;
+        p.scale.setScalar(p.userData.life);
+        if(p.userData.life <= 0) {
+            scene.remove(p);
+            particles.splice(i, 1);
+        }
+    });
+
+    renderer.render(scene, camera);
+}
+</script>
+</body>
+</html>
